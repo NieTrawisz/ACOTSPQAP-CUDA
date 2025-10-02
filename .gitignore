@@ -1,0 +1,29 @@
+ # Ignore files with no extensions
+*.
+
+# Ignore Windows DLL files
+*.dll
+
+# Ignore C/C++ and CUDA build artifacts
+*.o
+*.obj
+*.so
+*.exe
+*.out
+*.ptx
+*.cubin
+
+# Ignore general temp files
+*.log
+*.tmp
+*.swp
+*.DS_Store
+
+# Ignore folders
+/build/
+/bin/
+/results/
+/src/
+/include/
+/data/
+/scripts/
