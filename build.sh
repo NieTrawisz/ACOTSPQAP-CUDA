@@ -8,24 +8,6 @@ if command -v nvidia-smi &> /dev/null; then
     GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | tr -d '.')
     GPU_ARCH="sm_${GPU_CC}"
     echo "Detected GPU architecture: ${GPU_ARCH}"
-else
-    echo "Warning: nvidia-smi not found, using default sm_70"
-    GPU_ARCH="sm_70"
-fi
-
-# Build options
-echo "Building CUDA ACO..."
-echo "1) Simple version (standalone)"
-echo "2) Full version with C++ interface"
-echo "3) Debug version"
-read -p "Select option (1-3): " option
-
-# Detect GPU architecture
-GPU_ARCH=""
-if command -v nvidia-smi &> /dev/null; then
-    GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | tr -d '.')
-    GPU_ARCH="sm_${GPU_CC}"
-    echo "Detected GPU architecture: ${GPU_ARCH}"
     ARCH_FLAG="-arch=${GPU_ARCH}"
 else
     echo "Warning: nvidia-smi not found, letting nvcc auto-detect GPU"
