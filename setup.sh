@@ -129,13 +129,22 @@ case $option in
         # Create the library interface file with proper defines
         echo "Creating cuda_aco_lib.cu..."
         cat > cuda_aco_lib.cu << 'EOLIB'
-/* CUDA ACO Library Interface */
+/* CUDA ACO Library Interface - DO NOT INCLUDE main.cpp! */
 #define ACO_LIBRARY_MODE
 #include "cuda_aco_main.cu"
 EOLIB
         
         mkdir -p bin
-        nvcc ${ARCH_FLAG} -O3 -use_fast_math --extended-lambda -o bin/cuda_aco cuda_aco_lib.cu main.cpp -lcudart -lcurand -lm
+        # Compile separately then link
+        echo "Compiling CUDA library..."
+        nvcc ${ARCH_FLAG} -O3 -use_fast_math -c -o cuda_aco_lib.o cuda_aco_lib.cu
+        echo "Compiling main.cpp..."
+        nvcc ${ARCH_FLAG} -O3 -c -o main.o main.cpp
+        echo "Linking..."
+        nvcc ${ARCH_FLAG} -O3 -o bin/cuda_aco cuda_aco_lib.o main.o -lcudart -lcurand -lm
+        
+        # Clean up object files
+        rm -f cuda_aco_lib.o main.o
         ;;
     3)
         echo "Building debug version..."

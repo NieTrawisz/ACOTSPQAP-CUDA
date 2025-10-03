@@ -23,8 +23,8 @@ BIN_DIR = bin
 
 # Source files (assuming they're in current directory)
 # If you have a src/ directory, uncomment the next line and comment the current SRCS
-# SRCS = src/cuda_aco_lib.cu src/main.cpp
-SRCS = cuda_aco_lib.cu main.cpp
+# SRCS = src/cuda_aco_lib.cu src/main.cu
+SRCS = cuda_aco_lib.cu main.cu
 
 # Object files
 OBJS = $(BUILD_DIR)/cuda_aco_lib.o $(BUILD_DIR)/main.o
@@ -45,19 +45,19 @@ $(TARGET): $(OBJS)
 	$(NVCC) -arch=$(GPU_ARCH) $(CUDA_FLAGS) -o $@ $^ $(LDFLAGS)
 
 # Compile CUDA source file (library version without main)
-$(BUILD_DIR)/cuda_aco_lib.o: cuda_aco_lib.cu cuda_aco_main.cu cuda_aco_kernels.cuh
+$(BUILD_DIR)/cuda_aco_lib.o: cuda_aco_lib.cu main.cu cuda_aco_kernels.cuh
 	@echo "Compiling CUDA library: $<"
 	$(NVCC) -arch=$(GPU_ARCH) $(CUDA_FLAGS) -dc $< -o $@
 
 # Compile C++ source file
-$(BUILD_DIR)/main.o: main.cpp
+$(BUILD_DIR)/main.o: main.cu
 	@echo "Compiling C++: $<"
 	$(CXX) $(CXX_FLAGS) -c $< -o $@
 
 # Alternative: compile as a single CUDA file (simpler approach)
 simple: dirs
 	@echo "Building simple version..."
-	$(NVCC) -arch=$(GPU_ARCH) $(CUDA_FLAGS) -DSTANDALONE_BUILD -o $(BIN_DIR)/cuda_aco_simple cuda_aco_main.cu $(LDFLAGS)
+	$(NVCC) -arch=$(GPU_ARCH) $(CUDA_FLAGS) -DSTANDALONE_BUILD -o $(BIN_DIR)/cuda_aco_simple main.cu $(LDFLAGS)
 
 # Generate test data
 test-data:
@@ -81,7 +81,7 @@ clean:
 test: simple test-data
 	./$(BIN_DIR)/cuda_aco_simple
 
-# Run with example (after creating proper main.cpp integration)
+# Run with example (after creating proper main.cu integration)
 run: $(TARGET) test-data
 	./$(TARGET) --problem tsp --instance data/test100.tsp --ants 128 --iterations 100
 
