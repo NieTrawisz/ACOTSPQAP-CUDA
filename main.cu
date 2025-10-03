@@ -17,6 +17,7 @@
 #include <math.h>
 #include <float.h>
 #include <time.h>
+#include <algorithm>
 
 // Include the shared header
 #include "cuda_aco.h"
@@ -111,6 +112,25 @@ __global__ void compute_heuristic(float* heuristic, float* distance, int n) {
     }
 }
 
+// Simplified greedy next city selection for debugging
+__device__ int select_next_city_greedy(Ant* ant, float* distance, int n_cities) {
+    int current = ant->current_city;
+    float min_dist = FLT_MAX;
+    int best_city = -1;
+    
+    for (int j = 0; j < n_cities; j++) {
+        if (!ant->visited[j]) {
+            float dist = distance[current * n_cities + j];
+            if (dist < min_dist && dist > 0) {
+                min_dist = dist;
+                best_city = j;
+            }
+        }
+    }
+    
+    return best_city;
+}
+
 // Device function to select next city using probability rule
 __device__ int select_next_city(Ant* ant, float* pheromone, float* heuristic, 
                                 curandState* rand_state, int n_cities, 
@@ -118,17 +138,27 @@ __device__ int select_next_city(Ant* ant, float* pheromone, float* heuristic,
     float q = curand_uniform(rand_state);
     int current = ant->current_city;
     
+    // For debugging: Use greedy selection initially
+    if (pheromone == nullptr) {
+        return -1;
+    }
+    
     if (q < q0) {  // Exploitation (ACS)
         float max_val = -1.0f;
         int best_city = -1;
         
         for (int j = 0; j < n_cities; j++) {
             if (!ant->visited[j]) {
-                float val = powf(pheromone[current * n_cities + j], alpha) * 
-                           powf(heuristic[current * n_cities + j], beta);
-                if (val > max_val) {
-                    max_val = val;
-                    best_city = j;
+                float tau = pheromone[current * n_cities + j];
+                float eta = heuristic[current * n_cities + j];
+                
+                // Check for valid values
+                if (tau > 0 && eta > 0) {
+                    float val = powf(tau, alpha) * powf(eta, beta);
+                    if (val > max_val) {
+                        max_val = val;
+                        best_city = j;
+                    }
                 }
             }
         }
@@ -136,10 +166,21 @@ __device__ int select_next_city(Ant* ant, float* pheromone, float* heuristic,
     } else {  // Exploration
         // Calculate probabilities
         float sum = 0.0f;
+        float probs[MAX_CITIES];
+        
         for (int j = 0; j < n_cities; j++) {
             if (!ant->visited[j]) {
-                sum += powf(pheromone[current * n_cities + j], alpha) * 
-                      powf(heuristic[current * n_cities + j], beta);
+                float tau = pheromone[current * n_cities + j];
+                float eta = heuristic[current * n_cities + j];
+                
+                if (tau > 0 && eta > 0) {
+                    probs[j] = powf(tau, alpha) * powf(eta, beta);
+                    sum += probs[j];
+                } else {
+                    probs[j] = 0.0f;
+                }
+            } else {
+                probs[j] = 0.0f;
             }
         }
         
@@ -151,17 +192,11 @@ __device__ int select_next_city(Ant* ant, float* pheromone, float* heuristic,
         
         for (int j = 0; j < n_cities; j++) {
             if (!ant->visited[j]) {
-                cumsum += powf(pheromone[current * n_cities + j], alpha) * 
-                         powf(heuristic[current * n_cities + j], beta);
+                cumsum += probs[j];
                 if (cumsum >= r) {
                     return j;
                 }
             }
-        }
-        
-        // Fallback: return first unvisited city
-        for (int j = 0; j < n_cities; j++) {
-            if (!ant->visited[j]) return j;
         }
     }
     
@@ -199,18 +234,42 @@ __global__ void construct_solutions(Ant* ants, float* pheromone, float* heuristi
         int next_city = select_next_city(ant, pheromone, heuristic, rand_state,
                                         n_cities, alpha, beta, q0);
         
-        if (next_city >= 0) {
+        if (next_city >= 0 && next_city < n_cities) {
+            // Add city to tour
             ant->tour[step] = next_city;
             ant->visited[next_city] = true;
-            ant->tour_length += distance[ant->current_city * n_cities + next_city];
+            
+            // Add distance
+            int from = ant->current_city;
+            int to = next_city;
+            ant->tour_length += distance[from * n_cities + to];
+            
+            // Update current city
             ant->current_city = next_city;
             ant->tour_size++;
+        } else {
+            // If no valid city found, try to find any unvisited city
+            for (int j = 0; j < n_cities; j++) {
+                if (!ant->visited[j]) {
+                    ant->tour[step] = j;
+                    ant->visited[j] = true;
+                    ant->tour_length += distance[ant->current_city * n_cities + j];
+                    ant->current_city = j;
+                    ant->tour_size++;
+                    break;
+                }
+            }
         }
     }
     
     // Complete tour (return to start)
-    if (ant->tour_size == n_cities) {
+    if (ant->tour_size == n_cities && start_city >= 0 && start_city < n_cities) {
         ant->tour_length += distance[ant->current_city * n_cities + start_city];
+    }
+    
+    // Debug: Check if tour is complete
+    if (ant->tour_size != n_cities) {
+        printf("Warning: Ant %d only visited %d cities\n", ant_id, ant->tour_size);
     }
 }
 
@@ -353,7 +412,10 @@ __global__ void two_opt_ls(int* tour, float* distance, int n_cities,
 // Host functions for ACO management
 // These are the implementations of the functions declared in cuda_aco.h
 
+// Use extern "C" only when compiling as library for C++ compatibility
+#ifdef ACO_LIBRARY_MODE
 extern "C" {
+#endif
 
 ACOData* aco_init(int n_cities, int n_ants, ACOAlgorithm algo, ProblemType prob) {
     ACOData* aco = (ACOData*)malloc(sizeof(ACOData));
@@ -361,6 +423,8 @@ ACOData* aco_init(int n_cities, int n_ants, ACOAlgorithm algo, ProblemType prob)
     aco->n_ants = n_ants;
     aco->algo_type = algo;
     aco->prob_type = prob;
+    
+    printf("Initializing ACO: %d cities, %d ants\n", n_cities, n_ants);
     
     // Allocate device memory
     int matrix_size = n_cities * n_cities * sizeof(float);
@@ -381,6 +445,15 @@ ACOData* aco_init(int n_cities, int n_ants, ACOAlgorithm algo, ProblemType prob)
         h_ants[i].tour_length = 0.0f;
         h_ants[i].current_city = 0;
         h_ants[i].tour_size = 0;
+        
+        // Initialize tour array to -1
+        int* init_tour = (int*)malloc(n_cities * sizeof(int));
+        for (int j = 0; j < n_cities; j++) {
+            init_tour[j] = -1;
+        }
+        CUDA_CHECK(cudaMemcpy(h_ants[i].tour, init_tour, n_cities * sizeof(int), 
+                            cudaMemcpyHostToDevice));
+        free(init_tour);
     }
     CUDA_CHECK(cudaMalloc(&aco->d_ants, n_ants * sizeof(Ant)));
     CUDA_CHECK(cudaMemcpy(aco->d_ants, h_ants, n_ants * sizeof(Ant), 
@@ -405,8 +478,27 @@ ACOData* aco_init(int n_cities, int n_ants, ACOAlgorithm algo, ProblemType prob)
     return aco;
 }
 
+// Simple test kernel to verify basic functionality
+__global__ void test_ant_init(Ant* ants, int n_cities, int n_ants) {
+    int ant_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ant_id >= n_ants) return;
+    
+    Ant* ant = &ants[ant_id];
+    
+    // Simple sequential tour for testing
+    for (int i = 0; i < n_cities; i++) {
+        ant->tour[i] = i;
+        ant->visited[i] = true;
+    }
+    ant->tour_size = n_cities;
+    ant->tour_length = 100.0f * ant_id;  // Dummy length
+    ant->current_city = n_cities - 1;
+}
+
 void aco_load_problem(ACOData* aco, float* distance_matrix, float* flow_matrix) {
     int matrix_size = aco->n_cities * aco->n_cities * sizeof(float);
+    
+    printf("Loading problem data...\n");
     
     CUDA_CHECK(cudaMemcpy(aco->d_distance, distance_matrix, matrix_size,
                         cudaMemcpyHostToDevice));
@@ -420,6 +512,25 @@ void aco_load_problem(ACOData* aco, float* distance_matrix, float* flow_matrix) 
     int blocks = (aco->n_cities * aco->n_cities + BLOCK_SIZE - 1) / BLOCK_SIZE;
     compute_heuristic<<<blocks, BLOCK_SIZE>>>(aco->d_heuristic, aco->d_distance,
                                              aco->n_cities);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Verify distance matrix was loaded correctly
+    float sample_dist;
+    CUDA_CHECK(cudaMemcpy(&sample_dist, aco->d_distance, sizeof(float),
+                        cudaMemcpyDeviceToHost));
+    printf("Sample distance[0][0] = %.2f\n", sample_dist);
+    
+    // Test: Initialize ants with simple tours
+    int ant_blocks = (aco->n_ants + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    test_ant_init<<<ant_blocks, BLOCK_SIZE>>>(aco->d_ants, aco->n_cities, aco->n_ants);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Verify test initialization
+    Ant h_test_ant;
+    CUDA_CHECK(cudaMemcpy(&h_test_ant, &aco->d_ants[0], sizeof(Ant),
+                        cudaMemcpyDeviceToHost));
+    printf("Test ant tour size: %d, length: %.2f\n", 
+           h_test_ant.tour_size, h_test_ant.tour_length);
 }
 
 void aco_run(ACOData* aco, int max_iterations, float* best_tour, float* best_length) {
@@ -429,6 +540,13 @@ void aco_run(ACOData* aco, int max_iterations, float* best_tour, float* best_len
     float h_best_length = FLT_MAX;
     int h_best_ant_idx = -1;
     
+    // Initialize best tour to invalid values
+    for (int i = 0; i < aco->n_cities; i++) {
+        best_tour[i] = -1;
+    }
+    
+    printf("Starting ACO with %d ants for %d cities\n", aco->n_ants, aco->n_cities);
+    
     for (int iter = 0; iter < max_iterations; iter++) {
         // Construct solutions
         construct_solutions<<<ant_blocks, BLOCK_SIZE>>>(
@@ -436,6 +554,13 @@ void aco_run(ACOData* aco, int max_iterations, float* best_tour, float* best_len
             aco->d_rand_states, aco->n_cities, aco->n_ants, ALPHA, BETA, Q0
         );
         CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Check for CUDA errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("CUDA error in construct_solutions: %s\n", cudaGetErrorString(err));
+            break;
+        }
         
         // Local search (optional) - fixed to work with device memory
         if (iter % 10 == 0 && aco->n_ants > 0) {  // Apply every 10 iterations
@@ -462,9 +587,11 @@ void aco_run(ACOData* aco, int max_iterations, float* best_tour, float* best_len
         CUDA_CHECK(cudaMalloc(&d_best_ant_idx, sizeof(int)));
         
         float max_float = FLT_MAX;
+        int neg_one = -1;
         CUDA_CHECK(cudaMemcpy(d_best_ant_length, &max_float, sizeof(float),
                             cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d_best_ant_idx, -1, sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_best_ant_idx, &neg_one, sizeof(int),
+                            cudaMemcpyHostToDevice));
         
         find_best_ant<<<ant_blocks, BLOCK_SIZE>>>(aco->d_ants, aco->n_ants,
                                                  d_best_ant_idx, d_best_ant_length);
@@ -475,6 +602,38 @@ void aco_run(ACOData* aco, int max_iterations, float* best_tour, float* best_len
                             cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(&h_best_length, d_best_ant_length, sizeof(float),
                             cudaMemcpyDeviceToHost));
+        
+        // Debug: Check ant tours
+        if (iter == 0 || iter % 100 == 0) {
+            printf("Iteration %d: ", iter);
+            if (h_best_ant_idx >= 0) {
+                printf("Best ant %d, length = %.2f\n", h_best_ant_idx, h_best_length);
+            } else {
+                printf("No valid ant found!\n");
+                
+                // Debug: Check first ant's tour
+                Ant h_ant_debug;
+                CUDA_CHECK(cudaMemcpy(&h_ant_debug, &aco->d_ants[0], sizeof(Ant),
+                                    cudaMemcpyDeviceToHost));
+                int* h_tour_debug = (int*)malloc(aco->n_cities * sizeof(int));
+                CUDA_CHECK(cudaMemcpy(h_tour_debug, h_ant_debug.tour,
+                                    aco->n_cities * sizeof(int),
+                                    cudaMemcpyDeviceToHost));
+                printf("First ant tour: ");
+                for (int i = 0; i < std::min(10, aco->n_cities); i++) {
+                    printf("%d ", h_tour_debug[i]);
+                }
+                printf("... (length: %.2f, size: %d)\n", 
+                       h_ant_debug.tour_length, h_ant_debug.tour_size);
+                free(h_tour_debug);: ");
+                for (int i = 0; i < min(10, aco->n_cities); i++) {
+                    printf("%d ", h_tour_debug[i]);
+                }
+                printf("... (length: %.2f, size: %d)\n", 
+                       h_ant_debug.tour_length, h_ant_debug.tour_size);
+                free(h_tour_debug);
+            }
+        }
         
         // Update pheromones
         evaporate_pheromone<<<matrix_blocks, BLOCK_SIZE>>>(aco->d_pheromone,
@@ -609,7 +768,9 @@ void aco_cleanup(ACOData* aco) {
     free(aco);
 }
 
+#ifdef ACO_LIBRARY_MODE
 } // extern "C"
+#endif
 
 // Remove the old extern "C" declarations since they're now in the header
 // The functions are already wrapped in extern "C" above
